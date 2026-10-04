@@ -1,0 +1,10 @@
+/target/
+/dist/
+*.log
+*.tmp
+.DS_Store
+
+# Keep real server addresses and deployment records out of version control.
+/private/
+*.private.json
+DEPLOYMENT.private.md

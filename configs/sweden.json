@@ -1,0 +1,27 @@
+{
+  "settings": {
+    "max_connections": 512,
+    "buffer_bytes": 65536,
+    "connect_timeout_secs": 5,
+    "drain_timeout_secs": 30,
+    "copy_mode": "auto"
+  },
+  "routes": [
+    {
+      "name": "vpn",
+      "listen": "0.0.0.0:55000",
+      "target": "127.0.0.1:55601",
+      "allowed_ips": [
+        "192.0.2.10"
+      ]
+    },
+    {
+      "name": "iperf",
+      "listen": "0.0.0.0:55100",
+      "target": "127.0.0.1:5201",
+      "allowed_ips": [
+        "192.0.2.10"
+      ]
+    }
+  ]
+}

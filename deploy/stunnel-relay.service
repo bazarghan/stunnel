@@ -1,0 +1,43 @@
+[Unit]
+Description=Rust transparent TCP relay
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStartPre=/usr/local/bin/stunnel-relay --check --config /etc/stunnel-relay/config.json
+ExecStart=/usr/local/bin/stunnel-relay --config /etc/stunnel-relay/config.json
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=15
+TimeoutStopSec=40
+KillSignal=SIGTERM
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
+LimitNOFILE=65536
+TasksMax=128
+Environment=RUST_LOG=info
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
