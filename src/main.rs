@@ -1,5 +1,6 @@
 mod config;
 mod copy;
+mod obfuscation;
 mod relay;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
@@ -23,7 +24,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "--help" | "-h" => {
-                println!("Usage: stunnel-relay --config FILE [--check]\nTransparent TCP forwarding; automatic Linux splice or buffered copy.");
+                println!("Usage: stunnel-relay --config FILE [--check]\nTCP forwarding; optional iperf3 obfuscation configured in FILE.");
                 return Ok(());
             }
             _ => bail!("unknown argument: {arg}"),
@@ -33,9 +34,14 @@ fn main() -> Result<()> {
     let config = config::Config::load(&path)?;
     if check {
         println!(
-            "configuration valid: {} routes, {}",
+            "configuration valid: {} routes, {}, obfuscation={:?}",
             config.routes.len(),
-            copy::engine(config.settings.copy_mode)
+            if config.settings.obfuscation == config::Obfuscation::Iperf3 {
+                "iperf3-masked-buffered"
+            } else {
+                copy::engine(config.settings.copy_mode)
+            },
+            config.settings.obfuscation,
         );
         return Ok(());
     }

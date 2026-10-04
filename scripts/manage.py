@@ -148,9 +148,12 @@ def split_address(value):
     return ip.strip('[]'), port
 
 
-def configure_route(existing=None):
+def configure_route(existing=None, obfuscation='none'):
     existing = existing or {}
-    default_role = '2' if existing.get('allowed_ips') else '1'
+    if existing.get('obfuscation_role'):
+        default_role = '2' if existing['obfuscation_role'] == 'server' else '1'
+    else:
+        default_role = '2' if existing.get('allowed_ips') else '1'
     print('\n1) Iran server    2) Kharej server')
     role = ask('This server', default_role,
                lambda value: value if value in ('1', '2') else invalid('choose 1 or 2'))
@@ -175,6 +178,9 @@ def configure_route(existing=None):
              'target': address(target_ip, target_port)}
     if allowed_ips:
         route['allowed_ips'] = allowed_ips
+    if obfuscation == 'iperf3':
+        route['obfuscation_role'] = 'client' if role == '1' else 'server'
+        print('iperf3 obfuscation enabled. Enable it on the matching server too.')
     print(f"\n{name}: {route['listen']} → {route['target']}")
     if allowed_ips:
         print('Allowed sources: ' + ', '.join(allowed_ips))
@@ -191,11 +197,14 @@ def confirm(label):
 
 
 def list_tunnels():
-    routes = load_config()['routes']
+    data = load_config()
+    routes = data['routes']
+    mode = data.get('settings', {}).get('obfuscation', 'none')
     if not routes:
         print('No tunnels configured. Choose Add tunnel to set up this server.')
     for index, route in enumerate(routes, 1):
         print(f"{index}) {route['name']}: {route['listen']} → {route['target']}")
+        print('   Obfuscation: ' + mode)
         if route.get('allowed_ips'):
             print('   Allowed Iran IPs: ' + ', '.join(route['allowed_ips']))
     return routes
@@ -236,7 +245,7 @@ def ensure_route_fits(data, route, replacing=None):
 
 
 def add_tunnel():
-    route = configure_route()
+    route = configure_route(obfuscation=load_config().get('settings', {}).get('obfuscation', 'none'))
     if route is None:
         return
     def transform(data):
@@ -251,7 +260,7 @@ def edit_tunnel(name=None):
     original = select_route(name)
     if original is None:
         return
-    route = configure_route(original)
+    route = configure_route(original, obfuscation=load_config().get('settings', {}).get('obfuscation', 'none'))
     if route is None:
         return
     def transform(data):

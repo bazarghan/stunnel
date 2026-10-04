@@ -26,6 +26,26 @@ For example: Iran port `5500` → Kharej port `55000` → Xray port `55601`.
 
 Allow the entry port on Iran and the tunnel port on Kharej in your server/provider firewall. Repeat **Add tunnel** to connect more Kharej servers or ports; each listener needs its own port. Each server is configured separately.
 
+## Optional iperf3 obfuscation
+
+During interactive installation, answer **yes** to **Enable iperf3 obfuscation?** on **both servers**. The default on a fresh installation is **no**; pressing Enter leaves normal TCP forwarding enabled. Reinstalling without selecting a new mode preserves the existing choice.
+
+For an unattended installation, use `--obfuscation yes` (or `--obfuscation no` to disable it):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/bazarghan/stunnel/main/install.sh) --obfuscation yes
+```
+
+If the latest prebuilt release lacks this feature, the installer automatically builds the current source. You can also add `--source` to request a source build directly. The menu assigns Iran the client role and Kharej the server role. Existing routes are assigned roles from their Iran-IP allowlists unless an explicit role is already configured. The mode applies to all tunnels on that server, so configure matching modes at their other ends.
+
+This custom transport imitates an iperf3 bidirectional TCP test: a random 37-byte cookie, a length-prefixed JSON parameter exchange, control state messages, two data connections, and a final result exchange. Payload scrambling hides recognizable application headers between Iran and Kharej; clients and destination services receive the original bytes. The control/data structure follows the [iperf3 protocol](https://github.com/esnet/iperf/wiki/IperfProtocolStates) and its [bidirectional stream setup](https://github.com/esnet/iperf/blob/master/src/iperf_client_api.c).
+
+This is traffic camouflage, not encryption or authentication: the scrambling seed is public. Keep your service's TLS and credentials. It is not an iperf3 benchmark endpoint, and packet timing, traffic volume and long-lived sessions may still distinguish it from a real benchmark. Classification by traffic inspection is not guaranteed.
+
+Obfuscated transfers use buffered copying. Each active Kharej session holds three incoming sockets (one control and two data), so `max_connections: 512` allows at most 170 fully established sessions there, with fewer available while handshakes are pending. Handshakes have the configured connection timeout; half-closes still allow the other direction to finish.
+
+For manual JSON configuration, set `settings.obfuscation` to `"iperf3"` and add `"obfuscation_role": "client"` to every Iran route or `"obfuscation_role": "server"` to every Kharej route. Omitting `settings.obfuscation` uses normal forwarding. Existing plain configurations continue to work.
+
 ## Manage or remove
 
 Open the menu anytime:

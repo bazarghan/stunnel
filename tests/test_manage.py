@@ -158,6 +158,19 @@ class ManagerTests(unittest.TestCase):
                 manager.edit_tunnel()
         self.assertEqual(manager.load_config()['routes'][0]['target'], '203.0.113.2:443')
 
+    def test_obfuscated_menu_assigns_and_preserves_correct_endpoint_role(self):
+        for role, answers in (
+            ('client', ['1', 'iran', '', '5500', '198.51.100.20', '55000', 'y']),
+            ('server', ['2', 'kharej', '', '55000', '', '55601', '192.0.2.10', 'y']),
+        ):
+            with patch('builtins.input', side_effect=answers), contextlib.redirect_stdout(io.StringIO()):
+                configured = manager.configure_route(obfuscation='iperf3')
+            self.assertEqual(configured['obfuscation_role'], role)
+            # Role, name, listener IP/port, target IP/port, and optional allowlist.
+            blanks = [''] * (7 if role == 'server' else 6) + ['y']
+            with patch('builtins.input', side_effect=blanks), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(manager.configure_route(configured, obfuscation='iperf3'), configured)
+
     def test_uninstall_confirmation_and_complete_cleanup_preserve_other_files(self):
         for path in (manager.BINARY, manager.COMMAND, manager.UNIT, manager.LIB_DIR / 'manage.py'):
             path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,6 @@
 use crate::{
-    config::{Config, Route, Settings},
-    copy,
+    config::{Config, Obfuscation, ObfuscationRole, Route, Settings},
+    copy, obfuscation,
 };
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, SockRef, Socket, TcpKeepalive, Type};
@@ -33,6 +33,8 @@ struct Incoming {
     stream: TcpStream,
     route: Arc<Route>,
     permit: OwnedSemaphorePermit,
+    sessions: obfuscation::ServerSessions,
+    order: u64,
 }
 fn tune(stream: &TcpStream, s: &Settings) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
@@ -69,16 +71,44 @@ async fn connect_and_copy(
     route: &Route,
     s: &Settings,
 ) -> Result<(u64, u64)> {
-    tune(&stream, s)?;
-    let mut target = time::timeout(
+    let mut target = connect(route.target, s).await?;
+    Ok(copy::transfer(&mut stream, &mut target, s.copy_mode, s.buffer_bytes).await?)
+}
+pub(crate) async fn connect(address: std::net::SocketAddr, s: &Settings) -> Result<TcpStream> {
+    let target = time::timeout(
         Duration::from_secs(s.connect_timeout_secs),
-        TcpStream::connect(route.target),
+        TcpStream::connect(address),
     )
     .await
     .context("destination connection timed out")?
     .context("destination connection failed")?;
     tune(&target, s)?;
-    Ok(copy::transfer(&mut stream, &mut target, s.copy_mode, s.buffer_bytes).await?)
+    Ok(target)
+}
+async fn transfer(incoming: Incoming, s: &Settings) -> Result<Option<(u64, u64)>> {
+    tune(&incoming.stream, s)?;
+    if s.obfuscation == Obfuscation::Iperf3 {
+        if incoming.route.obfuscation_role == Some(ObfuscationRole::Server) {
+            return incoming
+                .sessions
+                .accept(
+                    incoming.stream,
+                    incoming.route.target,
+                    s,
+                    incoming.permit,
+                    incoming.order,
+                )
+                .await;
+        }
+        let _permit = incoming.permit;
+        return obfuscation::client(incoming.stream, incoming.route.target, s)
+            .await
+            .map(Some);
+    }
+    let _permit = incoming.permit;
+    connect_and_copy(incoming.stream, &incoming.route, s)
+        .await
+        .map(Some)
 }
 fn log_stats(stats: &Stats, capacity: &Semaphore, max: usize) {
     info!(
@@ -108,14 +138,22 @@ pub async fn run(config: Config) -> Result<()> {
         bound.push((Arc::new(route), listener));
     }
     for (route, listener) in bound {
-        info!(route=%route.name,listen=%route.listen,target=%route.target,engine=copy::engine(settings.copy_mode),"listening");
+        let engine = if settings.obfuscation == Obfuscation::Iperf3 {
+            "iperf3-masked-buffered"
+        } else {
+            copy::engine(settings.copy_mode)
+        };
+        info!(route=%route.name,listen=%route.listen,target=%route.target,engine,obfuscation=?settings.obfuscation,"listening");
         let tx = tx.clone();
         let semaphore = semaphore.clone();
         let stats = stats.clone();
         listeners.spawn(async move {
+            let sessions = obfuscation::ServerSessions::default();
+            let mut order = 0;
             loop {
                 match listener.accept().await {
                     Ok((stream, peer)) => {
+                        order += 1;
                         if !route.allows(peer.ip()) {
                             stats.denied.fetch_add(1, Ordering::Relaxed);
                             drop(stream);
@@ -135,6 +173,8 @@ pub async fn run(config: Config) -> Result<()> {
                                 stream,
                                 route: route.clone(),
                                 permit,
+                                sessions: sessions.clone(),
+                                order,
                             })
                             .await
                             .is_err()
@@ -162,13 +202,14 @@ pub async fn run(config: Config) -> Result<()> {
                 let Some(incoming)=incoming else{anyhow::bail!("all listener tasks exited")};
                 let settings=settings.clone();let stats=stats.clone();
                 connections.spawn(async move{
-                    let _permit=incoming.permit;
-                    match connect_and_copy(incoming.stream,&incoming.route,&settings).await {
-                        Ok((up,down))=>{
+                    let route = incoming.route.clone();
+                    match transfer(incoming,&settings).await {
+                        Ok(Some((up,down)))=>{
                             stats.completed.fetch_add(1,Ordering::Relaxed);stats.uploaded.fetch_add(up,Ordering::Relaxed);stats.downloaded.fetch_add(down,Ordering::Relaxed);
-                            debug!(route=%incoming.route.name,uploaded=up,downloaded=down,"connection completed");
+                            debug!(route=%route.name,uploaded=up,downloaded=down,"connection completed");
                         }
-                        Err(e)=>{stats.failed.fetch_add(1,Ordering::Relaxed);warn!(route=%incoming.route.name,error=%e,"connection failed");}
+                        Ok(None)=>{},
+                        Err(e)=>{stats.failed.fetch_add(1,Ordering::Relaxed);warn!(route=%route.name,error=%e,"connection failed");}
                     }
                 });
             }

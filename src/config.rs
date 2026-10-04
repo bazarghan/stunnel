@@ -13,6 +13,21 @@ pub enum CopyMode {
     Buffered,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Obfuscation {
+    #[default]
+    None,
+    Iperf3,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ObfuscationRole {
+    Client,
+    Server,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
@@ -26,6 +41,7 @@ pub struct Settings {
     pub tcp_user_timeout_secs: u64,
     pub stats_interval_secs: u64,
     pub copy_mode: CopyMode,
+    pub obfuscation: Obfuscation,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -40,6 +56,7 @@ impl Default for Settings {
             tcp_user_timeout_secs: 45,
             stats_interval_secs: 30,
             copy_mode: CopyMode::Auto,
+            obfuscation: Obfuscation::None,
         }
     }
 }
@@ -52,6 +69,8 @@ pub struct Route {
     pub target: SocketAddr,
     #[serde(default)]
     pub allowed_ips: Vec<IpAddr>,
+    #[serde(default)]
+    pub obfuscation_role: Option<ObfuscationRole>,
 }
 impl Route {
     pub fn allows(&self, ip: IpAddr) -> bool {
@@ -106,6 +125,15 @@ impl Config {
         let mut names = HashSet::new();
         let mut listens = HashSet::new();
         for route in &self.routes {
+            if s.obfuscation == Obfuscation::Iperf3 {
+                if route.obfuscation_role.is_none() {
+                    bail!("iperf3 obfuscation requires obfuscation_role (client on Iran, server on Kharej) for {}", route.name);
+                }
+                if route.obfuscation_role == Some(ObfuscationRole::Server) && s.max_connections < 3
+                {
+                    bail!("iperf3 server requires max_connections >= 3 (control and two data sockets)");
+                }
+            }
             if route.name.is_empty() || !names.insert(&route.name) {
                 bail!("route names must be nonempty and unique");
             }
@@ -147,6 +175,22 @@ mod tests {
     fn rejects_unknown_settings() {
         assert!(serde_json::from_str::<Config>(
             r#"{"routes":[],"settings":{"connect_timout_secs":5}}"#
+        )
+        .is_err());
+    }
+    #[test]
+    fn obfuscation_is_opt_in_and_requires_endpoint_roles() {
+        let mut c = config();
+        assert_eq!(c.settings.obfuscation, Obfuscation::None);
+        c.settings.obfuscation = Obfuscation::Iperf3;
+        assert!(c.validate().is_err());
+        c.routes[0].obfuscation_role = Some(ObfuscationRole::Client);
+        assert!(c.validate().is_ok());
+        c.routes[0].obfuscation_role = Some(ObfuscationRole::Server);
+        c.settings.max_connections = 2;
+        assert!(c.validate().is_err());
+        assert!(serde_json::from_str::<Config>(
+            r#"{"routes":[],"settings":{"obfuscation":"yes"}}"#
         )
         .is_err());
     }

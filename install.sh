@@ -9,6 +9,7 @@ NO_MENU=0
 BINARY=
 CONFIG=
 SOURCE=0
+OBFUSCATION=
 SCRIPT_DIR=$(
     if cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null; then
         pwd
@@ -17,22 +18,26 @@ SCRIPT_DIR=$(
 
 usage() {
     cat <<'HELP'
-Usage: install.sh [--no-menu] [--version vX.Y.Z] [--source]
+Usage: install.sh [--no-menu] [--version vX.Y.Z] [--source] [--obfuscation yes|no]
                   [--binary FILE --config FILE]
 Installs the relay and the stunnel management menu on a Linux systemd server.
 Run as root. STUNNEL_REPO and STUNNEL_REF override the GitHub source repository/ref.
+Obfuscation defaults to no on fresh installations; updates preserve the current choice.
 HELP
 }
 while (($#)); do
     case "$1" in
         --no-menu) NO_MENU=1; shift ;;
         --source) SOURCE=1; shift ;;
-        --version|--binary|--config)
+        --version|--binary|--config|--obfuscation)
             (($# >= 2)) || { usage >&2; exit 1; }
             case "$1" in
                 --version) VERSION=$2 ;;
                 --binary) BINARY=$2 ;;
                 --config) CONFIG=$2 ;;
+                --obfuscation)
+                    [[ $2 == yes || $2 == no ]] || { echo '--obfuscation must be yes or no.' >&2; exit 1; }
+                    OBFUSCATION=$2 ;;
             esac
             shift 2 ;;
         --help|-h) usage; exit 0 ;;
@@ -94,7 +99,56 @@ python3 -c 'import sys; sys.exit(sys.version_info < (3, 8))' || { echo 'Python 3
 WORK=$(mktemp -d)
 trap 'rm -rf -- "$WORK"' EXIT
 fetch() { curl --fail --show-error --silent --location --retry 3 --connect-timeout 15 "$1" -o "$2"; }
+# Ask only in interactive installations. No answer enables anything on a fresh install.
+if [[ -z $OBFUSCATION && $NO_MENU == 0 && -r /dev/tty ]]; then
+    DEFAULT_OBFUSCATION=no
+    CURRENT_CONFIG=${CONFIG:-/etc/stunnel-relay/config.json}
+    if [[ -f $CURRENT_CONFIG ]] && python3 - "$CURRENT_CONFIG" <<'PY'
+import json, sys
+sys.exit(json.load(open(sys.argv[1])).get('settings', {}).get('obfuscation') != 'iperf3')
+PY
+    then
+        DEFAULT_OBFUSCATION=yes
+    fi
+    while true; do
+        read -r -p "Enable iperf3 obfuscation? Both servers must match. [$DEFAULT_OBFUSCATION]: " ANSWER </dev/tty || ANSWER=
+        case "$ANSWER" in
+            '')
+                if [[ ! -f $CURRENT_CONFIG ]]; then OBFUSCATION=no; fi
+                break ;;
+            [yY]|[yY][eE][sS]) OBFUSCATION=yes; break ;;
+            [nN]|[nN][oO]) OBFUSCATION=no; break ;;
+            *) echo 'Enter yes or no.' ;;
+        esac
+    done
+fi
 BUNDLE=
+PREBUILT=0
+build_source() {
+    echo 'Building from source. The first installation may take several minutes.'
+    SOURCE_REF=$REF
+    [[ $VERSION == latest ]] || SOURCE_REF=$VERSION
+    fetch "https://codeload.github.com/$REPO/tar.gz/$SOURCE_REF" "$WORK/source.tar.gz"
+    mkdir "$WORK/source"
+    tar -xzf "$WORK/source.tar.gz" -C "$WORK/source" --strip-components=1 --no-same-owner
+    BUNDLE=$WORK/source
+    if ! command -v cc >/dev/null 2>&1; then install_packages build; fi
+    if ! command -v cargo >/dev/null 2>&1 || ! command -v rustup >/dev/null 2>&1; then
+        fetch https://sh.rustup.rs "$WORK/rustup.sh"
+        export RUSTUP_HOME="$WORK/rustup" CARGO_HOME="$WORK/cargo"
+        bash "$WORK/rustup.sh" -y --profile minimal --default-toolchain none --no-modify-path
+        export PATH="$CARGO_HOME/bin:$PATH"
+    fi
+    (cd "$BUNDLE" && cargo build --release --locked)
+    BINARY=$BUNDLE/target/release/stunnel-relay
+}
+check_bundle() {
+    [[ -f "$BUNDLE/scripts/manage.py" && -f "$BUNDLE/deploy/stunnel-relay.service" && -f $BINARY ]] || {
+        echo 'The downloaded bundle is incomplete.' >&2; exit 1;
+    }
+    chmod 0755 "$BINARY"
+    "$BINARY" --version
+}
 if [[ -n $BINARY ]]; then
     [[ -f $BINARY && -f "$SCRIPT_DIR/scripts/manage.py" ]] || {
         echo '--binary requires a local checkout/release bundle and an existing binary.' >&2; exit 1;
@@ -116,36 +170,75 @@ else
         tar -xzf "$WORK/$ASSET" -C "$WORK/bundle" --no-same-owner
         BUNDLE=$WORK/bundle
         BINARY=$BUNDLE/stunnel-relay
+        PREBUILT=1
     else
         if [[ $VERSION != latest && $SOURCE == 0 ]]; then
             echo "Release $VERSION could not be downloaded." >&2; exit 1
         fi
-        echo 'Building from source. The first installation may take several minutes.'
-        SOURCE_REF=$REF
-        [[ $VERSION == latest ]] || SOURCE_REF=$VERSION
-        fetch "https://codeload.github.com/$REPO/tar.gz/$SOURCE_REF" "$WORK/source.tar.gz"
-        mkdir "$WORK/source"
-        tar -xzf "$WORK/source.tar.gz" -C "$WORK/source" --strip-components=1 --no-same-owner
-        BUNDLE=$WORK/source
-        if ! command -v cc >/dev/null 2>&1; then install_packages build; fi
-        if ! command -v cargo >/dev/null 2>&1 || ! command -v rustup >/dev/null 2>&1; then
-            fetch https://sh.rustup.rs "$WORK/rustup.sh"
-            export RUSTUP_HOME="$WORK/rustup" CARGO_HOME="$WORK/cargo"
-            bash "$WORK/rustup.sh" -y --profile minimal --default-toolchain none --no-modify-path
-            export PATH="$CARGO_HOME/bin:$PATH"
-        fi
-        (cd "$BUNDLE" && cargo build --release --locked)
-        BINARY=$BUNDLE/target/release/stunnel-relay
+        build_source
     fi
 fi
-[[ -f "$BUNDLE/scripts/manage.py" && -f "$BUNDLE/deploy/stunnel-relay.service" && -f $BINARY ]] || {
-    echo 'The downloaded bundle is incomplete.' >&2; exit 1;
-}
-chmod 0755 "$BINARY"
-"$BINARY" --version
+check_bundle
+[[ -z $CONFIG || -f $CONFIG ]] || { echo 'The supplied configuration file does not exist.' >&2; exit 1; }
+# Prepare the selected mode before touching installed files. Route roles use the
+# same Iran/Kharej convention as the management menu; explicit roles win.
+if [[ -n $OBFUSCATION ]]; then
+    python3 - "${CONFIG:-/etc/stunnel-relay/config.json}" "$WORK/config.json" "$OBFUSCATION" <<'PY'
+import json, pathlib, sys
+source = pathlib.Path(sys.argv[1])
+data = json.loads(source.read_text()) if source.exists() else {'settings': {}, 'routes': []}
+if sys.argv[3] == 'yes':
+    data.setdefault('settings', {})['obfuscation'] = 'iperf3'
+    for route in data['routes']:
+        route.setdefault('obfuscation_role', 'server' if route.get('allowed_ips') else 'client')
+else:
+    data.setdefault('settings', {}).pop('obfuscation', None)
+    for route in data['routes']:
+        route.pop('obfuscation_role', None)
+pathlib.Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
+PY
+    CONFIG=$WORK/config.json
+fi
+# Latest releases may predate this feature. Probe a minimal valid configuration
+# so unrelated configuration errors do not trigger an unnecessary source build.
+SELECTED_CONFIG=${CONFIG:-/etc/stunnel-relay/config.json}
+if [[ -f $SELECTED_CONFIG ]] && python3 - "$SELECTED_CONFIG" <<'PY'
+import json, sys
+sys.exit(json.load(open(sys.argv[1])).get('settings', {}).get('obfuscation') != 'iperf3')
+PY
+then
+    cat > "$WORK/iperf3-check.json" <<'JSON'
+{"settings":{"obfuscation":"iperf3"},"routes":[{"name":"probe","listen":"127.0.0.1:5500","target":"127.0.0.1:5501","obfuscation_role":"client"}]}
+JSON
+    if ! "$BINARY" --check --config "$WORK/iperf3-check.json" >/dev/null 2>&1; then
+        if [[ $PREBUILT == 1 && $VERSION == latest ]]; then
+            echo 'The latest prebuilt release lacks iperf3 support; building current source.'
+            build_source
+            check_bundle
+        fi
+        "$BINARY" --check --config "$WORK/iperf3-check.json" || {
+            echo 'This binary does not support iperf3 obfuscation. Use current source or a newer release.' >&2
+            exit 1
+        }
+    fi
+fi
 # Keep the current configuration on reinstall/update unless one was supplied explicitly.
 if [[ -n $CONFIG ]]; then
-    "$BINARY" --check --config "$CONFIG"
+    # Even an installation with no routes must check support for the new mode.
+    python3 - "$CONFIG" "$WORK/check.json" <<'PY'
+import json, pathlib, sys
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if not data['routes']:
+    data['routes'] = [{'name': 'install-check', 'listen': '127.0.0.1:5500',
+                      'target': '127.0.0.1:5501', 'obfuscation_role': 'client'}]
+    if data.get('settings', {}).get('obfuscation') != 'iperf3':
+        data['routes'][0].pop('obfuscation_role')
+pathlib.Path(sys.argv[2]).write_text(json.dumps(data))
+PY
+    "$BINARY" --check --config "$WORK/check.json" || {
+        echo 'Configuration check failed. For iperf3 mode, use a release that supports it or retry with --source.' >&2
+        exit 1
+    }
 elif [[ -f /etc/stunnel-relay/config.json ]]; then
     if python3 -c 'import json, sys; sys.exit(bool(json.load(open("/etc/stunnel-relay/config.json"))["routes"]))' 2>/dev/null; then
         : # An installation with no tunnels remains stopped.

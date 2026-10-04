@@ -139,6 +139,59 @@ shutil.copyfile(Path(os.environ['MOCK_ROOT']) / 'relay', out); out.chmod(0o755)
                          json.loads(self.config.read_text()))
         self.assertFalse(self.state_data()['active'] or self.state_data()['enabled'])
 
+    def test_obfuscation_yes_adds_roles_and_survives_reinstall_then_no_disables(self):
+        data = json.loads(self.config.read_text())
+        data['routes'].append({'name': 'kharej', 'listen': '0.0.0.0:55000',
+                               'target': '127.0.0.1:55601', 'allowed_ips': ['192.0.2.1']})
+        self.config.write_text(json.dumps(data))
+        self.install('--binary', self.binary, '--config', self.config, '--obfuscation', 'yes')
+        installed = self.root / 'etc/stunnel-relay/config.json'
+        saved = json.loads(installed.read_text())
+        self.assertEqual(saved['settings']['obfuscation'], 'iperf3')
+        self.assertEqual([r['obfuscation_role'] for r in saved['routes']], ['client', 'server'])
+        self.install('--binary', self.binary)
+        self.assertEqual(json.loads(installed.read_text()), saved)
+        self.install('--binary', self.binary, '--obfuscation', 'no')
+        disabled = json.loads(installed.read_text())
+        self.assertNotIn('obfuscation', disabled['settings'])
+        self.assertTrue(all('obfuscation_role' not in r for r in disabled['routes']))
+        self.assertNotIn('obfuscation', json.loads(self.config.read_text()).get('settings', {}))
+
+    def test_fresh_obfuscation_yes_without_routes_stays_stopped(self):
+        self.install('--binary', self.binary, '--obfuscation', 'yes')
+        data = json.loads((self.root / 'etc/stunnel-relay/config.json').read_text())
+        self.assertEqual(data, {'settings': {'obfuscation': 'iperf3'}, 'routes': []})
+        self.assertFalse(self.state_data()['active'] or self.state_data()['enabled'])
+
+    def test_interactive_install_requires_yes_and_blank_preserves_existing_choice(self):
+        tty = self.root / 'tty-input'
+        self.installer.write_text(self.installer.read_text().replace('/dev/tty', str(tty)))
+        (self.checkout / 'scripts/manage.py').write_text("print('menu opened')\n")
+        def interactive(answer):
+            tty.write_text(answer + '\n')
+            result = subprocess.run(['bash', str(self.installer), '--binary', str(self.binary)],
+                                    env=self.env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return json.loads((self.root / 'etc/stunnel-relay/config.json').read_text())
+        self.assertNotIn('obfuscation', interactive('')['settings'])
+        self.assertEqual(interactive('YES')['settings']['obfuscation'], 'iperf3')
+        self.assertEqual(interactive('')['settings']['obfuscation'], 'iperf3')
+        self.assertNotIn('obfuscation', interactive('no')['settings'])
+
+    def test_failed_mode_change_restores_previous_config(self):
+        self.install('--binary', self.binary, '--config', self.config)
+        self.set_state(fail_restart=True)
+        self.install('--binary', self.binary, '--obfuscation', 'yes', success=False)
+        self.assertEqual(json.loads((self.root / 'etc/stunnel-relay/config.json').read_text()),
+                         json.loads(self.config.read_text()))
+        self.assertTrue(self.state_data()['active'] and self.state_data()['enabled'])
+
+    def test_obfuscation_rejects_unknown_choice_and_missing_config(self):
+        self.install('--binary', self.binary, '--obfuscation', 'maybe', success=False)
+        self.install('--binary', self.binary, '--config', self.root / 'missing.json',
+                     '--obfuscation', 'yes', success=False)
+        self.assertFalse((self.root / 'etc/stunnel-relay/config.json').exists())
+
     def test_failed_upgrade_restores_binary_config_and_service(self):
         self.install('--binary', self.binary, '--config', self.config)
         installed = self.root / 'usr/local/bin/stunnel-relay'
@@ -166,6 +219,21 @@ shutil.copyfile(Path(os.environ['MOCK_ROOT']) / 'relay', out); out.chmod(0o755)
             bundle.add(self.checkout / 'deploy', arcname='stunnel-main/deploy')
         self.install()
         self.assertEqual((self.root / 'usr/local/bin/stunnel-relay').read_bytes(), self.binary.read_bytes())
+
+    def test_old_latest_release_builds_source_when_iperf3_is_selected(self):
+        current = self.binary.read_text()
+        self.binary.write_text(current + "\nif '--check' in sys.argv and data.get('settings', {}).get('obfuscation') == 'iperf3': sys.exit(1)\n")
+        self.prepare_release()
+        self.binary.write_text(current)
+        fixtures = Path(self.env['FIXTURES'])
+        with tarfile.open(fixtures / 'main', 'w:gz') as bundle:
+            bundle.add(self.checkout / 'scripts', arcname='stunnel-main/scripts')
+            bundle.add(self.checkout / 'deploy', arcname='stunnel-main/deploy')
+        result = self.install('--obfuscation', 'yes')
+        self.assertIn('lacks iperf3 support', result.stdout)
+        self.assertEqual((self.root / 'usr/local/bin/stunnel-relay').read_bytes(), self.binary.read_bytes())
+        self.assertEqual(json.loads((self.root / 'etc/stunnel-relay/config.json').read_text())['settings'],
+                         {'obfuscation': 'iperf3'})
 
     def test_existing_other_stunnel_is_never_overwritten(self):
         path = self.root / 'usr/local/bin/stunnel'
