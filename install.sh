@@ -9,7 +9,11 @@ NO_MENU=0
 BINARY=
 CONFIG=
 SOURCE=0
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)
+SCRIPT_DIR=$(
+    if cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null; then
+        pwd
+    fi
+)
 
 usage() {
     cat <<'HELP'
