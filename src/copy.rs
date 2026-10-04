@@ -16,6 +16,8 @@ pub async fn transfer(
     mode: CopyMode,
     size: usize,
 ) -> io::Result<(u64, u64)> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = mode;
     #[cfg(target_os = "linux")]
     if mode == CopyMode::Auto {
         return tokio::try_join!(splice_direction(a, b, size), splice_direction(b, a, size));

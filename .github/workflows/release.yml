@@ -1,0 +1,83 @@
+name: Check and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools shellcheck
+      - name: Check Rust
+        run: |
+          cargo fmt --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo build --locked
+      - name: Check scripts and management behavior
+        run: |
+          bash -n install.sh scripts/install.sh
+          shellcheck install.sh scripts/install.sh
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Verify real systemd install and uninstall
+        run: sudo env STUNNEL_SYSTEMD_TEST=1 python3 -m unittest discover -s tests -p 'test_systemd.py' -v
+      - name: Build portable Linux release
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          rustup target add '${{ matrix.target }}'
+          cargo build --release --locked --target '${{ matrix.target }}'
+          target/${{ matrix.target }}/release/stunnel-relay --check --config configs/iran.json
+          mkdir -p bundle/scripts bundle/deploy dist
+          cp target/${{ matrix.target }}/release/stunnel-relay bundle/
+          cp install.sh bundle/
+          cp scripts/install.sh scripts/manage.py bundle/scripts/
+          cp deploy/stunnel-relay.service bundle/deploy/
+          tar -czf dist/stunnel-relay-linux-${{ matrix.arch }}.tar.gz -C bundle .
+          cd dist
+          sha256sum stunnel-relay-linux-${{ matrix.arch }}.tar.gz > stunnel-relay-linux-${{ matrix.arch }}.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" dist/* --clobber

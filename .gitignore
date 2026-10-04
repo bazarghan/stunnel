@@ -8,3 +8,6 @@
 /private/
 *.private.json
 DEPLOYMENT.private.md
+
+__pycache__/
+*.pyc
